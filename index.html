@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CHIP-8 system Emulator</title>
+    <style>
+        /* タッチによる不要な選択やハイライトを無効化 */
+        * {
+            box-sizing: border-box;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        body { 
+            background-color: #1a1a1a; 
+            color: #fff; 
+            font-family: sans-serif; 
+            text-align: center; 
+            margin: 0;
+            padding: 10px;
+            overflow-x: hidden;
+        }
+        h1 { font-size: 1.5rem; margin: 10px 0; }
+        .controls { margin-bottom: 10px; }
+        input[type="file"] { background: #333; color: #fff; padding: 8px; border-radius: 5px; border: 1px solid #555; cursor: pointer; font-size: 0.9rem; }
+        
+        /* 画面サイズに合わせて自動縮小するレスポンシブCanvas */
+        .canvas-container {
+            width: 100%;
+            max-width: 640px;
+            margin: 0 auto;
+        }
+        canvas { 
+            background-color: #000; 
+            border: 4px solid #333; 
+            box-shadow: 0 0 20px rgba(0,0,0,0.7); 
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        /* スマホ用バーチャルパッドのグリッド配置（テトリスや一般的なゲームの操作に最適化） */
+        .gamepad {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            max-width: 400px;
+            margin: 20px auto;
+            padding: 0 10px;
+        }
+        .btn {
+            background: linear-gradient(145deg, #333, #222);
+            border: 2px solid #555;
+            color: #fff;
+            padding: 15px 0;
+            font-size: 1.2rem;
+            font-weight: bold;
+            border-radius: 10px;
+            box-shadow: 0 4px #111;
+            text-align: center;
+            touch-action: manipulation; /* 連打時のズーム防止 */
+        }
+        /* ボタンが押されたときのアニメーション */
+        .btn:active, .btn.active {
+            background: #00ffcc;
+            color: #000;
+            border-color: #fff;
+            transform: translateY(2px);
+            box-shadow: 0 2px #111;
+        }
+
+        .info { color: #888; font-size: 12px; margin-top: 15px; line-height: 1.5; }
+    </style>
+</head>
+<body>
+
+    <h1>👾 Web CHIP-8 system Emulator</h1>
+    
+    <div class="controls">
+        <input type="file" id="rom-upload" accept=".ch8, .rom, *">
+    </div>
+
+    <div class="canvas-container">
+        <canvas id="gameCanvas" width="640" height="320"></canvas>
+    </div>
+
+    <div class="gamepad" id="gamepad">
+        <div class="btn" data-key="0x1">1</div>
+        <div class="btn" data-key="0x2">2</div>
+        <div class="btn" data-key="0x3">3</div>
+        <div class="btn" data-key="0xC">C</div>
+        <div class="btn" data-key="0x4">4</div>
+        <div class="btn" data-key="0x5">5</div>
+        <div class="btn" data-key="0x6">6</div>
+        <div class="btn" data-key="0xD">D</div>
+        <div class="btn" data-key="0x7">7</div>
+        <div class="btn" data-key="0x8">8</div>
+        <div class="btn" data-key="0x9">9</div>
+        <div class="btn" data-key="0xE">E</div>
+        <div class="btn" data-key="0xA">A</div>
+        <div class="btn" data-key="0x0">0</div>
+        <div class="btn" data-key="0xB">B</div>
+        <div class="btn" data-key="0xF">F</div>
+    </div>
+
+    <div class="info">
+        パソコンではキーボード（1234/QWER/ASDF/ZXCV）でも操作できます。
+    </div>
+
+    <script>
+        // --- 1. 仮想マシンの環境（スペック）を用意 ---
+        let systemmemory = new Array(4096).fill(0);
+        let v_registers = new Array(16).fill(0);
+        let ma_register = 0;
+        let pcreader = 0x200;  
+        let display = new Array(64 * 32).fill(0);
+        let Presskey = new Array(16).fill(0);
+        let stack = new Array(16).fill(0);
+        let stack_pointer = 0;
+        let delay_timer = 0;
+        let sound_timer = 0;
+        let cpuhayasa = 15; 
+
+        const KEY_MAP = {
+            '1': 0x1, '2': 0x2, '3': 0x3, '4': 0xC,
+            'q': 0x4, 'w': 0x5, 'e': 0x6, 'r': 0xD,
+            'a': 0x7, 's': 0x8, 'd': 0x9, 'f': 0xE,
+            'z': 0xA, 'x': 0x0, 'c': 0xB, 'v': 0xF
+        };
+
+        const FONT_SET = [
+            0xF0, 0x90, 0x90, 0x90, 0xF0, 0x20, 0x60, 0x20, 0x20, 0x70,
+            0xF0, 0x10, 0xF0, 0x80, 0xF0, 0xF0, 0x10, 0xF0, 0x10, 0xF0,
+            0x90, 0x90, 0xF0, 0x10, 0x10, 0xF0, 0x80, 0xF0, 0x10, 0xF0,
+            0xF0, 0x80, 0xF0, 0x90, 0xF0, 0xF0, 0x10, 0x20, 0x40, 0x40,
+            0xF0, 0x90, 0xF0, 0x90, 0xF0, 0xF0, 0x90, 0xF0, 0x10, 0xF0,
+            0xF0, 0x90, 0xF0, 0x90, 0x90, 0xE0, 0x90, 0xE0, 0x90, 0xE0,
+            0xF0, 0x80, 0x80, 0x80, 0xF0, 0xE0, 0x90, 0x90, 0x90, 0xE0,
+            0xF0, 0x80, 0xF0, 0x80, 0xF0, 0xF0, 0x80, 0xF0, 0x80, 0x80
+        ];
+
+        for (let i = 0; i < FONT_SET.length; i++) {
+            systemmemory[i] = FONT_SET[i];
+        }
+
+        const canvas = document.getElementById("gameCanvas");
+        const ctx = canvas.getContext("2d");
+        const SCALE = 10;
+
+        // --- ROMファイルの読み込み処理 ---
+        document.getElementById("rom-upload").addEventListener("change", function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                systemmemory.fill(0);
+                for (let i = 0; i < FONT_SET.length; i++) systemmemory[i] = FONT_SET[i];
+                v_registers.fill(0);
+                ma_register = 0;
+                pcreader = 0x200;
+                stack.fill(0);
+                stack_pointer = 0;
+                delay_timer = 0;
+                sound_timer = 0;
+                display.fill(0);
+
+                const romData = new Uint8Array(e.target.result);
+                let basho = 512;
+                for (let i = 0; i < romData.length; i++) {
+                    if (basho < 4096) {
+                        systemmemory[basho] = romData[i];
+                        basho++;
+                    }
+                }
+                console.log("ROM Loaded successfully!");
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // --- キー入力の監視（PCキーボード用） ---
+        window.addEventListener("keydown", function(event) {
+            let key = event.key.toLowerCase();
+            if (key in KEY_MAP) {
+                Presskey[KEY_MAP[key]] = 1;
+                highlightButton(KEY_MAP[key], true);
+            }
+        });
+
+        window.addEventListener("keyup", function(event) {
+            let key = event.key.toLowerCase();
+            if (key in KEY_MAP) {
+                Presskey[KEY_MAP[key]] = 0;
+                highlightButton(KEY_MAP[key], false);
+            }
+        });
+
+        // --- 【新規】スマホ用タッチイベントの監視 ---
+        const buttons = document.querySelectorAll('.btn');
+        buttons.forEach(button => {
+            const hexKey = parseInt(button.getAttribute('data-key'), 16);
+
+            // タッチ開始
+            button.addEventListener('touchstart', (e) => {
+                e.preventDefault(); // スクロールやダブルタップズームを防止
+                Presskey[hexKey] = 1;
+                button.classList.add('active');
+            });
+
+            // タッチ終了
+            button.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                Presskey[hexKey] = 0;
+                button.classList.remove('active');
+            });
+
+            // マウス操作（PCでクリックしてテストしたい時用）
+            button.addEventListener('mousedown', () => {
+                Presskey[hexKey] = 1;
+            });
+            button.addEventListener('mouseup', () => {
+                Presskey[hexKey] = 0;
+            });
+            button.addEventListener('mouseleave', () => {
+                Presskey[hexKey] = 0;
+            });
+        });
+
+        // キーボード操作時に画面上のボタンも連動して光らせる補助関数
+        function highlightButton(hexKey, isPressed) {
+            const btn = document.querySelector(`.btn[data-key="0x${hexKey.toString(16).toUpperCase()}"]`);
+            if (btn) {
+                if (isPressed) btn.classList.add('active');
+                else btn.classList.remove('active');
+            }
+        }
+
+        // --- メインループ ---
+        function mainLoop() {
+            for (let _ = 0; _ < cpuhayasa; _++) {
+                if (pcreader >= 4095) break;
+
+                let runcode = (systemmemory[pcreader] << 8) | systemmemory[pcreader + 1];
+                let first_letter = (runcode & 0xF000) >> 12;  
+                let x = (runcode & 0x0F00) >> 8;             
+                let y = (runcode & 0x00F0) >> 4;             
+                let n =  runcode & 0x000F;                   
+                let nn = runcode & 0x00FF;                   
+                let address = runcode & 0x0FFF;
+
+                if (first_letter === 0x1) {
+                    pcreader = address;
+                } else if (first_letter === 0x2) {
+                    stack[stack_pointer] = pcreader + 2;
+                    stack_pointer += 1;
+                    pcreader = address;
+                } else if (first_letter === 0x3) {
+                    if (v_registers[x] === nn) pcreader += 4; else pcreader += 2;
+                } else if (first_letter === 0x4) {
+                    if (v_registers[x] !== nn) pcreader += 4; else pcreader += 2;
+                } else if (first_letter === 0x5) {
+                    if (v_registers[x] === v_registers[y]) pcreader += 4; else pcreader += 2;
+                } else if (first_letter === 0x6) {
+                    v_registers[x] = nn;
+                    pcreader += 2;
+                } else if (first_letter === 0x7) {
+                    v_registers[x] = (v_registers[x] + nn) % 256;
+                    pcreader += 2;
+                } else if (first_letter === 0x9) {
+                    if (v_registers[x] !== v_registers[y]) pcreader += 4; else pcreader += 2;
+                } else if (first_letter === 0xA) {
+                    ma_register = address;
+                    pcreader += 2;
+                } else if (first_letter === 0xB) {
+                    pcreader = address + v_registers[0];
+                } else if (first_letter === 0xC) {
+                    v_registers[x] = Math.floor(Math.random() * 256) & nn;
+                    pcreader += 2;
+                } else if (first_letter === 0xD) {
+                    v_registers[15] = 0;  
+                    let sprite_x = v_registers[x] % 64;
+                    let sprite_y = v_registers[y] % 32;
+                    
+                    for (let row = 0; row < n; row++) {
+                        let sprite_byte = systemmemory[ma_register + row];
+                        for (let col = 0; col < 8; col++) {
+                            if ((sprite_byte & (0x80 >> col)) !== 0) {
+                                let pixel_x = (sprite_x + col) % 64;
+                                let pixel_y = (sprite_y + row) % 32;
+                                let index = pixel_x + (pixel_y * 64);
+                                
+                                if (display[index] === 1) {
+                                    v_registers[15] = 1;
+                                }
+                                display[index] ^= 1;
+                            }
+                        }
+                    }
+                    pcreader += 2;
+                } else if (runcode === 0x00E0) {
+                    display.fill(0);
+                    pcreader += 2;
+                } else if (runcode === 0x00EE) {
+                    stack_pointer -= 1;
+                    pcreader = stack[stack_pointer];
+                } else if (first_letter === 0x8) {
+                    if (n === 0x0) { v_registers[x] = v_registers[y]; pcreader += 2; }
+                    else if (n === 0x1) { v_registers[x] |= v_registers[y]; pcreader += 2; }
+                    else if (n === 0x2) { v_registers[x] &= v_registers[y]; pcreader += 2; }
+                    else if (n === 0x3) { v_registers[x] ^= v_registers[y]; pcreader += 2; }
+                    else if (n === 0x4) { 
+                        let total = v_registers[x] + v_registers[y];
+                        v_registers[15] = total > 255 ? 1 : 0;
+                        v_registers[x] = total % 256;
+                        pcreader += 2;
+                    } else if (n === 0x5) { 
+                        v_registers[15] = v_registers[x] >= v_registers[y] ? 1 : 0;
+                        v_registers[x] = (v_registers[x] - v_registers[y] + 256) % 256;
+                        pcreader += 2;
+                    } else if (n === 0x6) { 
+                        v_registers[15] = v_registers[x] & 1;
+                        v_registers[x] >>= 1;
+                        pcreader += 2;
+                    } else if (n === 0x7) { 
+                        v_registers[15] = v_registers[y] >= v_registers[x] ? 1 : 0;
+                        v_registers[x] = (v_registers[y] - v_registers[x] + 256) % 256;
+                        pcreader += 2;
+                    } else if (n === 0xE) { 
+                        v_registers[15] = (v_registers[x] & 0x80) >> 7;
+                        v_registers[x] = (v_registers[x] << 1) % 256;
+                        pcreader += 2;
+                    }
+                } else if (first_letter === 0xE) {
+                    if (nn === 0x9E) { 
+                        if (Presskey[v_registers[x]] === 1) pcreader += 4; else pcreader += 2;
+                    } else if (nn === 0xA1) { 
+                        if (Presskey[v_registers[x]] === 0) pcreader += 4; else pcreader += 2;
+                    }
+                } else if (first_letter === 0xF) {
+                    if (nn === 0x07) { v_registers[x] = delay_timer; pcreader += 2; }
+                    else if (nn === 0x15) { delay_timer = v_registers[x]; pcreader += 2; }
+                    else if (nn === 0x18) { sound_timer = v_registers[x]; pcreader += 2; }
+                    else if (nn === 0x1E) { ma_register = (ma_register + v_registers[x]) & 0xFFF; pcreader += 2; }
+                    else if (nn === 0x29) { ma_register = v_registers[x] * 5; pcreader += 2; } 
+                    else if (nn === 0x33) { 
+                        let v = v_registers[x];
+                        systemmemory[ma_register] = Math.floor(v / 100);
+                        systemmemory[ma_register + 1] = Math.floor(v / 10) % 10;
+                        systemmemory[ma_register + 2] = v % 10;
+                        pcreader += 2;
+                    } else if (nn === 0x55) { 
+                        for (let i = 0; i <= x; i++) systemmemory[ma_register + i] = v_registers[i];
+                        pcreader += 2;
+                    } else if (nn === 0x65) { 
+                        for (let i = 0; i <= x; i++) v_registers[i] = systemmemory[ma_register + i];
+                        pcreader += 2;
+                    } else if (nn === 0x0A) { 
+                        let pressed = false;
+                        for (let i = 0; i < 16; i++) {
+                            if (Presskey[i] === 1) { v_registers[x] = i; pressed = true; break; }
+                        }
+                        if (pressed) pcreader += 2;
+                    }
+                } else {
+                    pcreader += 2;
+                }
+            }
+
+            if (delay_timer > 0) delay_timer -= 1;
+            if (sound_timer > 0) sound_timer -= 1;
+
+            ctx.fillStyle = 'rgb(0, 0, 0)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#00ffcc'; 
+
+            for (let index = 0; index < 64 * 32; index++) {
+                if (display[index] === 1) {
+                    let px = index % 64;
+                    let py = Math.floor(index / 64);
+                    ctx.fillRect(px * SCALE, py * SCALE, SCALE - 1, SCALE - 1);
+                }
+            }
+
+            requestAnimationFrame(mainLoop);
+        }
+
+        requestAnimationFrame(mainLoop);
+    </script>
+</body>
+</html>
